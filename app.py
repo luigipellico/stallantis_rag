@@ -1,7 +1,7 @@
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download
 import zipfile
 from llama_index.core import Settings, StorageContext, load_index_from_storage
 # 🟢 USA L'EMBEDDING VIA API ANZICHÉ QUELLO LOCALE (che pesa su PyTorch)
@@ -23,18 +23,21 @@ HF_REPO_ID = os.environ.get("HF_REPO_ID", "luigipellico/stellantis-rag-indexes")
 query_engines_cache = {}
 
 def ensure_department_indexes_downloaded(department_name: str):
-    """Scarica e scompatta l'archivio ZIP del reparto da Hugging Face se non è presente in locale."""
+    """Scarica direttamente il file .zip del reparto da Hugging Face e lo scompatta."""
     zip_filename = f"storage_{department_name}.zip"
     extract_dir = f"storage_{department_name}"
     
     if not os.path.exists(extract_dir):
         print(f"📥 Scaricamento di {zip_filename} da Hugging Face Dataset...")
         try:
-            snapshot_download(
+            # Usa hf_hub_download per scaricare il singolo file zip
+            hf_hub_download(
                 repo_id=HF_REPO_ID,
                 repo_type="dataset",
-                allow_patterns=zip_filename,
-                local_dir="."
+                filename=zip_filename,
+                local_dir=".",
+                local_dir_use_symlinks=False,
+                token=os.environ.get("HF_TOKEN")
             )
             print(f"📦 Scompattamento di {zip_filename}...")
             with zipfile.ZipFile(zip_filename, 'r') as zip_ref:

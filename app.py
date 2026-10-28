@@ -11,7 +11,7 @@ from llama_index.llms.groq import Groq
 app = FastAPI()
 
 # Configurazione embedding leggera
-Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
+#Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 HF_REPO_ID = os.environ.get("HF_REPO_ID", "luigipellico/stellantis-rag-indexes")
 query_engines_cache = {}
@@ -38,6 +38,8 @@ def ensure_department_indexes_downloaded(department_name: str):
 def get_query_engine_for_department(department_name: str):
     if department_name in query_engines_cache:
         return query_engines_cache[department_name]
+    
+    Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
     
     # 1. Garantisci la presenza su disco dei file del reparto
     ensure_department_indexes_downloaded(department_name)

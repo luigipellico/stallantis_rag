@@ -13,7 +13,7 @@ app = FastAPI()
 # Configurazione embedding leggera
 Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-HF_REPO_ID = "IL_TUO_USERNAME_HF/stellantis-rag-indexes"  # Modifica qui con il tuo repo
+HF_REPO_ID = os.environ.get("HF_REPO_ID", "luigipellico/stellantis-rag-indexes")
 query_engines_cache = {}
 
 def ensure_department_indexes_downloaded(department_name: str):

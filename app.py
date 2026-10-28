@@ -1,103 +1,99 @@
 import os
-from pathlib import Path
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from llama_index.core import Settings, SimpleDirectoryReader, VectorStoreIndex, Document
+from huggingface_hub import snapshot_download
+from llama_index.core import Settings, StorageContext, load_index_from_storage
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.retrievers import QueryFusionRetriever
 from llama_index.llms.groq import Groq
 
 app = FastAPI()
 
-# Configurazione CORS per Typebot
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Configurazione LLM (Groq) e Embeddings
-groq_api_key = os.environ.get("GROQ_API_KEY")
-if not groq_api_key:
-    raise ValueError("La variabile d'ambiente GROQ_API_KEY non è impostata!")
-
-Settings.llm = Groq(model="llama3-70b-8192", api_key=groq_api_key)
+# Configurazione embedding leggera
 Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-# Funzione per classificare i file nei 3 domini
-def determina_dominio(filepath: str) -> str:
-    path_lower = filepath.lower()
+HF_REPO_ID = "IL_TUO_USERNAME_HF/stellantis-rag-indexes"  # Modifica qui con il tuo repo
+query_engines_cache = {}
+
+def ensure_department_indexes_downloaded(department_name: str):
+    """Verifica se le partizioni per il reparto esistono; altrimenti le scarica da Hugging Face."""
+    prefix = f"storage_{department_name}"
+    existing_dirs = [d for d in os.listdir(".") if (d == prefix or d.startswith(f"{prefix}_part")) and os.path.isdir(d)]
     
-    # 🟢 SERVICE (Officina, Garanzia, Bollettini, Ricambi)
-    if any(k in path_lower for k in [
-        'technical service', 'service contracts', 'garantia', 'ricambi', 
-        'tutorship', 'rsu', 'csn', 'safety recall', 'blocco consegne', 'attrezzatura'
-    ]):
-        return 'service'
-        
-    # 🔵 SALES (Commerciale, Marketing, Listini, Promozioni)
-    elif any(k in path_lower for k in [
-        'azioni mensili', 'marketing', 'area commerciale', 'iniziative commerciali', 
-        'listini', 'prezzi', 'sales', 'spoticar', 'usato', 'azioni commerciali', 'sfs'
-    ]):
-        return 'sales'
-        
-    # 🟣 HQ (Comunicazioni di Rete, Istituzionali, Customer Experience)
-    else:
-        return 'hq'
+    if not existing_dirs:
+        print(f"📥 Scaricamento indici per '{department_name}' da Hugging Face Dataset...")
+        try:
+            # Scarica solo le cartelle relative al reparto richiesto
+            snapshot_download(
+                repo_id=HF_REPO_ID,
+                repo_type="dataset",
+                allow_patterns=f"{prefix}*",
+                local_dir="."
+            )
+            print(f"✅ Indici per '{department_name}' scaricati con successo.")
+        except Exception as e:
+            print(f"❌ Errore durante il download da Hugging Face: {e}")
 
-print("📂 Caricamento e smistamento dei documenti...")
-tutti_i_documenti = SimpleDirectoryReader("./struttura_rag", recursive=True).load_data()
-
-docs_sales = []
-docs_service = []
-docs_hq = []
-
-for doc in tutti_i_documenti:
-    file_path = doc.metadata.get("file_path", "")
-    dominio = determina_dominio(file_path)
+def get_query_engine_for_department(department_name: str):
+    if department_name in query_engines_cache:
+        return query_engines_cache[department_name]
     
-    if dominio == 'service':
-        docs_service.append(doc)
-    elif dominio == 'sales':
-        docs_sales.append(doc)
-    else:
-        docs_hq.append(doc)
-
-print(f"📊 Documenti smistati -> Sales: {len(docs_sales)} | Service: {len(docs_service)} | HQ: {len(docs_hq)}")
-
-# Creazione degli indici separati per ciascun dominio
-print("⚡ Creazione Indice Sales...")
-sales_engine = VectorStoreIndex.from_documents(docs_sales).as_query_engine() if docs_sales else None
-
-print("⚡ Creazione Indice Service...")
-service_engine = VectorStoreIndex.from_documents(docs_service).as_query_engine() if docs_service else None
-
-print("⚡ Creazione Indice HQ...")
-hq_engine = VectorStoreIndex.from_documents(docs_hq).as_query_engine() if docs_hq else None
-
-print("✅ Tutti e 3 i domini sono pronti e operativi!")
+    # 1. Garantisci la presenza su disco dei file del reparto
+    ensure_department_indexes_downloaded(department_name)
+    
+    print(f"⚡ Caricamento Lazy in RAM degli indici per: {department_name}...")
+    prefix = f"storage_{department_name}"
+    part_dirs = [d for d in os.listdir(".") if (d == prefix or d.startswith(f"{prefix}_part")) and os.path.isdir(d)]
+    
+    if not part_dirs:
+        raise HTTPException(status_code=404, detail=f"Nessun indice trovato per {department_name}")
+    
+    # 2. Caricamento dinamico dei retrievers
+    retrievers = []
+    for pdir in sorted(part_dirs):
+        try:
+            storage_context = StorageContext.from_defaults(persist_dir=pdir)
+            index = load_index_from_storage(storage_context)
+            retrievers.append(index.as_retriever(similarity_top_k=3))
+        except Exception as e:
+            print(f"Errore caricamento {pdir}: {e}")
+            
+    if not retrievers:
+        raise HTTPException(status_code=500, detail=f"Errore inizializzazione indici {department_name}")
+    
+    # 3. Query Fusion Retriever tra le partizioni del reparto
+    fusion_retriever = QueryFusionRetriever(
+        retrievers=retrievers,
+        similarity_top_k=3,
+        num_queries=1,
+        use_async=False
+    )
+    
+    # LLM (Groq / OpenAI)
+    llm = Groq(model="llama3-70b-8192")
+    query_engine = RetrieverQueryEngine.from_args(retriever=fusion_retriever, llm=llm)
+    
+    query_engines_cache[department_name] = query_engine
+    return query_engine
 
 class ChatRequest(BaseModel):
     message: str
 
-# Endpoints parametrici per i 3 bot
 @app.post("/api/chat/sales")
 def chat_sales(req: ChatRequest):
-    if not sales_engine:
-        raise HTTPException(status_code=404, detail="Nessun documento trovato per il settore Sales.")
-    return {"message": str(sales_engine.query(req.message))}
+    engine = get_query_engine_for_department("sales")
+    res = engine.query(req.message)
+    return {"department": "sales", "response": str(res)}
 
 @app.post("/api/chat/service")
 def chat_service(req: ChatRequest):
-    if not service_engine:
-        raise HTTPException(status_code=404, detail="Nessun documento trovato per il settore Service.")
-    return {"message": str(service_engine.query(req.message))}
+    engine = get_query_engine_for_department("service")
+    res = engine.query(req.message)
+    return {"department": "service", "response": str(res)}
 
 @app.post("/api/chat/hq")
 def chat_hq(req: ChatRequest):
-    if not hq_engine:
-        raise HTTPException(status_code=404, detail="Nessun documento trovato per l'Head Quarter.")
-    return {"message": str(hq_engine.query(req.message))}
+    engine = get_query_engine_for_department("hq")
+    res = engine.query(req.message)
+    return {"department": "hq", "response": str(res)}

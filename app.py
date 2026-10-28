@@ -1,7 +1,8 @@
 import os
+import zipfile  # <-- AGGIUNTO per gestire gli zip
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download  # <-- MODIFICATO da snapshot_download a hf_hub_download
 from llama_index.core import Settings, StorageContext, load_index_from_storage
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.core.query_engine import RetrieverQueryEngine
@@ -17,23 +18,30 @@ HF_REPO_ID = os.environ.get("HF_REPO_ID", "luigipellico/stellantis-rag-indexes")
 query_engines_cache = {}
 
 def ensure_department_indexes_downloaded(department_name: str):
-    """Verifica se le partizioni per il reparto esistono; altrimenti le scarica da Hugging Face."""
+    """Scarica il file ZIP del reparto da Hugging Face e lo estrae se necessario."""
     prefix = f"storage_{department_name}"
+    
+    # Controlla se le cartelle di storage estratte esistono già sul disco
     existing_dirs = [d for d in os.listdir(".") if (d == prefix or d.startswith(f"{prefix}_part")) and os.path.isdir(d)]
     
     if not existing_dirs:
-        print(f"📥 Scaricamento indici per '{department_name}' da Hugging Face Dataset...")
+        zip_name = f"{prefix}.zip"
+        print(f"📥 Scaricamento archivio {zip_name} da Hugging Face...")
         try:
-            # Scarica solo le cartelle relative al reparto richiesto
-            snapshot_download(
+            # Scarica il file zip in modo efficiente con una singola chiamata
+            downloaded_path = hf_hub_download(
                 repo_id=HF_REPO_ID,
-                repo_type="dataset",
-                allow_patterns=f"{prefix}*",
-                local_dir="."
+                filename=zip_name,
+                repo_type="dataset"
             )
-            print(f"✅ Indici per '{department_name}' scaricati con successo.")
+            
+            print(f"📦 Estrazione di {zip_name} sul server...")
+            with zipfile.ZipFile(downloaded_path, 'r') as zip_ref:
+                zip_ref.extractall(".")
+                
+            print(f"✅ Indici per '{department_name}' pronti all'uso.")
         except Exception as e:
-            print(f"❌ Errore durante il download da Hugging Face: {e}")
+            print(f"❌ Errore durante il download o l'estrazione da Hugging Face: {e}")
 
 def get_query_engine_for_department(department_name: str):
     if department_name in query_engines_cache:
